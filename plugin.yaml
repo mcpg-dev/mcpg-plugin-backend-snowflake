@@ -1,0 +1,46 @@
+schema: mcpg.dev/plugin/v1
+id: dev.mcpg.backend.snowflake
+name: Snowflake Binding
+license: Apache-2.0
+description: |
+  Runs an operator-fixed analytical SQL statement against a Snowflake
+  warehouse over the REST API and returns the rows (Arrow result sets are
+  decoded to JSON; non-SELECT JSON results pass through). Auth is key-pair JWT
+  (`auth.mode: key_pair`) or password (`auth.mode: password`); the
+  `private_key_pem` / `password` secret resolves through the gateway
+  secret-resolver (`${env.X}` / `vault://...`) at config load. A read-only
+  guard (rejects non-SELECT/WITH/SHOW/DESCRIBE/EXPLAIN statements) and a
+  `max_rows` cap bound the statement. The statement text is operator-fixed —
+  caller arguments are NOT templated into the SQL. CEL-bound params are not
+  available: the `snowflake-api` REST driver exposes no server-side bind
+  parameter (its `exec` takes only a SQL string and its request body carries no
+  `bindings` field), and string-interpolating caller input would be an
+  injection surface, so it is deliberately omitted.
+
+  An `operation` field selects what a binding does: `query` (default) runs the
+  operator-fixed `statement`; `result_scan` re-fetches a prior query's result
+  set by its Snowflake query id (pagination / large-result re-read), running
+  `SELECT * FROM TABLE(RESULT_SCAN('<id>'))`. The query id arrives in the
+  `query_id` tool argument. Because the REST driver has no server-side bind, the
+  id is NOT free-form SQL — it is validated against a strict charset allowlist
+  (hex digits and hyphens only, length-bounded) and then embedded as a quoted
+  literal; anything carrying a quote, whitespace, semicolon, comment marker or
+  any other SQL metacharacter is rejected before reaching the SQL. `result_scan`
+  is inherently read-only and needs no `statement`.
+
+  A second `watch_strategy` entity (kind `snowflake_poll`) lets a resource
+  subscribe to Snowflake changes by POLLING. Each watcher carries its own
+  connection (`account` / `warehouse` / `database` / `schema` / `role` /
+  `auth`) plus a read-only scalar high-water `tracking_query` (e.g.
+  `SELECT max(updated_at) FROM events`). The plugin runs that query every
+  `interval_ms` (default 60000, floored at 250 ms) with a per-tick `timeout_ms`
+  budget (default 10000), and emits `notifications/resources/updated` whenever
+  the scalar advances past the previously-seen value (the first tick only
+  establishes the baseline, so a watcher never fires spuriously at startup). The
+  `tracking_query` is held to the same read-only keyword guard as the backend
+  statement; an empty / non-read-only query, an empty account/username, or a
+  bare `cred://` secret is rejected at watch start.
+class: backend
+runtime: native-cdylib-v1
+protocol_version: "1.0"
+required_capabilities: [network_outbound]
